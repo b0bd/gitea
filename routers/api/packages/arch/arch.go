@@ -132,7 +132,7 @@ func UploadPackageFile(ctx *context.Context) {
 		&packages_service.PackageFileCreationInfo{
 			PackageFileInfo: packages_service.PackageFileInfo{
 				Filename:     fmt.Sprintf("%s-%s-%s.pkg.tar.%s", pck.Name, pck.Version, pck.FileMetadata.Architecture, pck.FileCompressionExtension),
-				CompositeKey: fmt.Sprintf("%s|%s", repository, pck.FileMetadata.Architecture),
+				CompositeKey: fmt.Sprintf("%s|%s|%s", repository, pck.FileMetadata.Architecture, pck.Name),
 			},
 			Creator: ctx.Doer,
 			Data:    buf,
@@ -177,10 +177,9 @@ func GetPackageOrRepositoryFile(ctx *context.Context) {
 	}
 
 	opts := &packages_model.PackageFileSearchOptions{
-		OwnerID:      ctx.Package.Owner.ID,
-		PackageType:  packages_model.TypeArch,
-		Query:        filename,
-		CompositeKey: fmt.Sprintf("%s|%s", repository, architecture),
+		OwnerID:     ctx.Package.Owner.ID,
+		PackageType: packages_model.TypeArch,
+		Query:       filename,
 	}
 
 	if strings.HasSuffix(filename, ".db.tar.gz") || strings.HasSuffix(filename, ".files.tar.gz") || strings.HasSuffix(filename, ".files") || strings.HasSuffix(filename, ".db") {
@@ -194,6 +193,12 @@ func GetPackageOrRepositoryFile(ctx *context.Context) {
 			return
 		}
 		opts.VersionID = pv.ID
+		opts.CompositeKey = fmt.Sprintf("%s|%s", repository, architecture)
+	} else {
+		opts.Properties = map[string]string{
+			arch_module.PropertyRepository:   repository,
+			arch_module.PropertyArchitecture: architecture,
+		}
 	}
 
 	pfs, _, err := packages_model.SearchFiles(ctx, opts)
@@ -208,7 +213,11 @@ func GetPackageOrRepositoryFile(ctx *context.Context) {
 			return
 		}
 
-		opts.CompositeKey = fmt.Sprintf("%s|%s", repository, arch_module.AnyArch)
+		if opts.Properties != nil {
+			opts.Properties[arch_module.PropertyArchitecture] = arch_module.AnyArch
+		} else {
+			opts.CompositeKey = fmt.Sprintf("%s|%s", repository, arch_module.AnyArch)
+		}
 		if pfs, _, err = packages_model.SearchFiles(ctx, opts); err != nil {
 			apiError(ctx, http.StatusInternalServerError, err)
 			return
@@ -275,8 +284,11 @@ func DeletePackageVersion(ctx *context.Context) {
 	}
 
 	pfs, _, err := packages_model.SearchFiles(ctx, &packages_model.PackageFileSearchOptions{
-		VersionID:    pv.ID,
-		CompositeKey: fmt.Sprintf("%s|%s", repository, architecture),
+		VersionID: pv.ID,
+		Properties: map[string]string{
+			arch_module.PropertyRepository:   repository,
+			arch_module.PropertyArchitecture: architecture,
+		},
 	})
 	if err != nil {
 		apiError(ctx, http.StatusInternalServerError, err)

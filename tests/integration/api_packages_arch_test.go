@@ -162,7 +162,7 @@ license = MIT`)
 					assert.Condition(t, func() bool {
 						seen := false
 						expectedFilename := fmt.Sprintf("%s-%s-aarch64.pkg.tar.%s", packageName, packageVersion, compression)
-						expectedCompositeKey := repository + "|aarch64"
+						expectedCompositeKey := fmt.Sprintf("%s|aarch64|%s", repository, packageName)
 						for _, pf := range pfs {
 							if pf.Name == expectedFilename && pf.CompositeKey == expectedCompositeKey {
 								if seen {
