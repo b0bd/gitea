@@ -22,6 +22,9 @@ WORKDIR ${GOPATH}/src/code.gitea.io/gitea
 # TODO: in the future, maybe we can pre-build the frontend assets on one platform and share them for different platforms, the benefit is that it won't be affected by webpack plugin compatibility problems, then the working directory can be fully mounted and the COPY is not needed.
 COPY --exclude=.git/ . .
 
+# Ensure we are building from the working tree (including any local patches)
+RUN --mount=type=bind,source=".git/",target=".git/",ro git rev-parse --is-inside-work-tree
+
 # Build gitea, .git mount is required for version data
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target="/root/.cache/go-build" \

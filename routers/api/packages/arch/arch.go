@@ -14,6 +14,7 @@ import (
 
 	packages_model "code.gitea.io/gitea/models/packages"
 	"code.gitea.io/gitea/modules/json"
+	"code.gitea.io/gitea/modules/log"
 	packages_module "code.gitea.io/gitea/modules/packages"
 	arch_module "code.gitea.io/gitea/modules/packages/arch"
 	"code.gitea.io/gitea/modules/util"
@@ -69,6 +70,8 @@ func UploadPackageFile(ctx *context.Context) {
 		return
 	}
 
+	log.Info("arch: parsed upload", "repo", repository, "name", pck.Name, "version", pck.Version, "arch", pck.FileMetadata.Architecture, "base", pck.FileMetadata.Base)
+
 	if _, err := buf.Seek(0, io.SeekStart); err != nil {
 		apiError(ctx, http.StatusInternalServerError, err)
 		return
@@ -117,6 +120,9 @@ func UploadPackageFile(ctx *context.Context) {
 		return
 	}
 
+	compositeKey := fmt.Sprintf("%s|%s|%s", repository, pck.FileMetadata.Architecture, pck.Name)
+	log.Debug("arch: creating package file", "repo", repository, "arch", pck.FileMetadata.Architecture, "name", pck.Name, "version", pck.Version, "compositeKey", compositeKey)
+
 	_, _, err = packages_service.CreatePackageOrAddFileToExisting(
 		ctx,
 		&packages_service.PackageCreationInfo{
@@ -132,7 +138,7 @@ func UploadPackageFile(ctx *context.Context) {
 		&packages_service.PackageFileCreationInfo{
 			PackageFileInfo: packages_service.PackageFileInfo{
 				Filename:     fmt.Sprintf("%s-%s-%s.pkg.tar.%s", pck.Name, pck.Version, pck.FileMetadata.Architecture, pck.FileCompressionExtension),
-				CompositeKey: fmt.Sprintf("%s|%s", repository, pck.FileMetadata.Architecture),
+				CompositeKey: compositeKey,
 			},
 			Creator: ctx.Doer,
 			Data:    buf,
@@ -157,6 +163,7 @@ func UploadPackageFile(ctx *context.Context) {
 		return
 	}
 
+	log.Debug("arch: building repository index after upload", "repo", repository, "arch", pck.FileMetadata.Architecture)
 	if err := arch_service.BuildSpecificRepositoryFiles(ctx, ctx.Package.Owner.ID, repository, pck.FileMetadata.Architecture); err != nil {
 		apiError(ctx, http.StatusInternalServerError, err)
 		return
@@ -176,11 +183,12 @@ func GetPackageOrRepositoryFile(ctx *context.Context) {
 		filename = filename[:len(filename)-len(".sig")]
 	}
 
+	isRepositoryIndex := false
+
 	opts := &packages_model.PackageFileSearchOptions{
-		OwnerID:      ctx.Package.Owner.ID,
-		PackageType:  packages_model.TypeArch,
-		Query:        filename,
-		CompositeKey: fmt.Sprintf("%s|%s", repository, architecture),
+		OwnerID:     ctx.Package.Owner.ID,
+		PackageType: packages_model.TypeArch,
+		Query:       filename,
 	}
 
 	if strings.HasSuffix(filename, ".db.tar.gz") || strings.HasSuffix(filename, ".files.tar.gz") || strings.HasSuffix(filename, ".files") || strings.HasSuffix(filename, ".db") {
@@ -194,6 +202,13 @@ func GetPackageOrRepositoryFile(ctx *context.Context) {
 			return
 		}
 		opts.VersionID = pv.ID
+		opts.CompositeKey = fmt.Sprintf("%s|%s", repository, architecture)
+		isRepositoryIndex = true
+	} else {
+		opts.Properties = map[string]string{
+			arch_module.PropertyRepository:   repository,
+			arch_module.PropertyArchitecture: architecture,
+		}
 	}
 
 	pfs, _, err := packages_model.SearchFiles(ctx, opts)
@@ -201,20 +216,42 @@ func GetPackageOrRepositoryFile(ctx *context.Context) {
 		apiError(ctx, http.StatusInternalServerError, err)
 		return
 	}
+	log.Debug("arch: download lookup", "repo", repository, "arch", architecture, "filename", filenameOrig, "isIndex", isRepositoryIndex, "results", len(pfs))
 	if len(pfs) == 0 {
 		// Try again with architecture 'any'
 		if architecture == arch_module.AnyArch {
+			log.Debug("arch: no matches on first lookup, giving up", "repo", repository, "arch", architecture, "filename", filenameOrig)
 			apiError(ctx, http.StatusNotFound, nil)
 			return
 		}
 
-		opts.CompositeKey = fmt.Sprintf("%s|%s", repository, arch_module.AnyArch)
+		if opts.Properties != nil {
+			opts.Properties[arch_module.PropertyArchitecture] = arch_module.AnyArch
+		} else {
+			opts.CompositeKey = fmt.Sprintf("%s|%s", repository, arch_module.AnyArch)
+		}
 		if pfs, _, err = packages_model.SearchFiles(ctx, opts); err != nil {
 			apiError(ctx, http.StatusInternalServerError, err)
 			return
 		}
+		log.Debug("arch: any-arch fallback lookup", "repo", repository, "arch", architecture, "filename", filenameOrig, "results", len(pfs))
 	}
-	if len(pfs) != 1 {
+
+	if !isRepositoryIndex && len(pfs) != 1 {
+		pf, err := resolveArchPackageFile(ctx, repository, architecture, filename)
+		if err != nil {
+			apiError(ctx, http.StatusInternalServerError, err)
+			return
+		}
+		if pf == nil {
+			log.Debug("arch: unable to resolve package file", "repo", repository, "arch", architecture, "filename", filenameOrig)
+			apiError(ctx, http.StatusNotFound, nil)
+			return
+		}
+
+		pfs = []*packages_model.PackageFile{pf}
+	} else if len(pfs) != 1 {
+		log.Debug("arch: unexpected result count for repository index", "repo", repository, "arch", architecture, "filename", filenameOrig, "results", len(pfs))
 		apiError(ctx, http.StatusNotFound, nil)
 		return
 	}
@@ -251,6 +288,62 @@ func GetPackageOrRepositoryFile(ctx *context.Context) {
 	helper.ServePackageFile(ctx, s, u, pf)
 }
 
+func resolveArchPackageFile(ctx *context.Context, repository, architecture, filename string) (*packages_model.PackageFile, error) {
+	candidates, _, err := packages_model.SearchFiles(ctx, &packages_model.PackageFileSearchOptions{
+		OwnerID:     ctx.Package.Owner.ID,
+		PackageType: packages_model.TypeArch,
+		Query:       filename,
+	})
+	if err != nil {
+		return nil, err
+	}
+	log.Debug("arch: resolving ambiguous package", "repo", repository, "arch", architecture, "filename", filename, "candidates", len(candidates))
+
+	var anyMatch *packages_model.PackageFile
+	for _, candidate := range candidates {
+		repoProps, err := packages_model.GetPropertiesByName(ctx, packages_model.PropertyTypeFile, candidate.ID, arch_module.PropertyRepository)
+		if err != nil {
+			return nil, err
+		}
+		if len(repoProps) == 0 || repoProps[0].Value != repository {
+			log.Debug("arch: skip candidate due to repository mismatch", "candidate", candidate.ID, "repo", repository, "candidateRepo", propValue(repoProps))
+			continue
+		}
+
+		archProps, err := packages_model.GetPropertiesByName(ctx, packages_model.PropertyTypeFile, candidate.ID, arch_module.PropertyArchitecture)
+		if err != nil {
+			return nil, err
+		}
+		if len(archProps) == 0 {
+			log.Debug("arch: skip candidate missing architecture property", "candidate", candidate.ID)
+			continue
+		}
+
+		switch archProps[0].Value {
+		case architecture:
+			log.Debug("arch: resolved candidate with exact architecture", "candidate", candidate.ID)
+			return candidate, nil
+		case arch_module.AnyArch:
+			if anyMatch == nil {
+				log.Debug("arch: found any-arch candidate", "candidate", candidate.ID)
+				anyMatch = candidate
+			}
+		}
+	}
+
+	if anyMatch != nil {
+		log.Debug("arch: resolved candidate with any architecture", "candidate", anyMatch.ID)
+	}
+	return anyMatch, nil
+}
+
+func propValue(props []*packages_model.PackageProperty) string {
+	if len(props) == 0 {
+		return ""
+	}
+	return props[0].Value
+}
+
 func DeletePackageVersion(ctx *context.Context) {
 	repository := ctx.PathParam("repository")
 	architecture := ctx.PathParam("architecture")
@@ -275,8 +368,11 @@ func DeletePackageVersion(ctx *context.Context) {
 	}
 
 	pfs, _, err := packages_model.SearchFiles(ctx, &packages_model.PackageFileSearchOptions{
-		VersionID:    pv.ID,
-		CompositeKey: fmt.Sprintf("%s|%s", repository, architecture),
+		VersionID: pv.ID,
+		Properties: map[string]string{
+			arch_module.PropertyRepository:   repository,
+			arch_module.PropertyArchitecture: architecture,
+		},
 	})
 	if err != nil {
 		apiError(ctx, http.StatusInternalServerError, err)

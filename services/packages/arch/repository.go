@@ -22,6 +22,7 @@ import (
 	"code.gitea.io/gitea/modules/container"
 	"code.gitea.io/gitea/modules/globallock"
 	"code.gitea.io/gitea/modules/json"
+	"code.gitea.io/gitea/modules/log"
 	packages_module "code.gitea.io/gitea/modules/packages"
 	arch_module "code.gitea.io/gitea/modules/packages/arch"
 	"code.gitea.io/gitea/modules/util"
@@ -143,6 +144,8 @@ func BuildAllRepositoryFiles(ctx context.Context, ownerID int64) error {
 		return err
 	}
 
+	log.Debug("arch: rebuilding all repository files", "owner", ownerID, "existing", len(pfs))
+
 	for _, pf := range pfs {
 		if err := packages_service.DeletePackageFile(ctx, pf); err != nil {
 			return err
@@ -187,6 +190,7 @@ func BuildSpecificRepositoryFiles(ctx context.Context, ownerID int64, repository
 	}
 
 	for architecture := range architectures {
+		log.Debug("arch: building index", "owner", ownerID, "repo", repository, "arch", architecture)
 		if err := buildPackagesIndex(ctx, ownerID, pv, repository, architecture); err != nil {
 			return err
 		}
@@ -223,6 +227,8 @@ func buildPackagesIndex(ctx context.Context, ownerID int64, repoVersion *package
 		}
 		pfs = append(pfs, anyarchFiles...)
 	}
+
+	log.Debug("arch: found package files for index", "owner", ownerID, "repo", repository, "arch", architecture, "count", len(pfs))
 
 	// Delete the package indices if there are no packages
 	if len(pfs) == 0 {

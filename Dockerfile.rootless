@@ -20,6 +20,9 @@ WORKDIR ${GOPATH}/src/code.gitea.io/gitea
 # See the comments in Dockerfile
 COPY --exclude=.git/ . .
 
+# Ensure we are building from the working tree (including any local patches)
+RUN --mount=type=bind,source=".git/",target=".git/",ro git rev-parse --is-inside-work-tree
+
 # Build gitea, .git mount is required for version data
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target="/root/.cache/go-build" \
