@@ -284,8 +284,11 @@ func DeletePackageVersion(ctx *context.Context) {
 	}
 
 	pfs, _, err := packages_model.SearchFiles(ctx, &packages_model.PackageFileSearchOptions{
-		VersionID:    pv.ID,
-		CompositeKey: fmt.Sprintf("%s|%s", repository, architecture),
+		VersionID: pv.ID,
+		Properties: map[string]string{
+			arch_module.PropertyRepository:   repository,
+			arch_module.PropertyArchitecture: architecture,
+		},
 	})
 	if err != nil {
 		apiError(ctx, http.StatusInternalServerError, err)
